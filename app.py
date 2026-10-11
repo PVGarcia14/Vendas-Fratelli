@@ -20,6 +20,38 @@ def connect():
     conn.row_factory = sqlite3.Row
     return conn
 
+
+def get_support_cases():
+    with connect() as conn:
+        rows = conn.execute("SELECT * FROM support_cases ORDER BY updated_at DESC").fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
+def create_support_case(channel, contact_name, contact_handle, topic, summary, assigned_to):
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        cur = conn.execute("""INSERT INTO support_cases
+            (channel, contact_name, contact_handle, topic, summary, status, assigned_to, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'Novo', ?, ?, ?)""",
+            (channel, contact_name.strip(), contact_handle.strip(), topic, summary.strip(), assigned_to.strip(), now, now))
+        case_id = cur.lastrowid
+        conn.execute("INSERT INTO support_events (case_id, event_type, details, created_at) VALUES (?, ?, ?, ?)",
+                     (case_id, "Caso criado", f"Canal: {channel}; assunto: {topic}", now))
+        return case_id
+
+def update_support_case(case_id, status, assigned_to, note):
+    now = datetime.now().isoformat(timespec="seconds")
+    with connect() as conn:
+        conn.execute("UPDATE support_cases SET status=?, assigned_to=?, updated_at=? WHERE id=?",
+                     (status, assigned_to.strip(), now, int(case_id)))
+        conn.execute("INSERT INTO support_events (case_id, event_type, details, created_at) VALUES (?, ?, ?, ?)",
+                     (int(case_id), "Atualização", f"Estado: {status}; responsável: {assigned_to.strip()}; nota: {note.strip()}", now))
+
+def get_support_events(case_id):
+    with connect() as conn:
+        rows = conn.execute("""SELECT event_type, details, created_at FROM support_events
+                               WHERE case_id=? ORDER BY id DESC""", (int(case_id),)).fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
 def init_db():
     with connect() as conn:
         conn.execute("""
@@ -44,6 +76,15 @@ def init_db():
                 FOREIGN KEY(product_id) REFERENCES products(id)
             )
         """)
+        conn.execute("""CREATE TABLE IF NOT EXISTS support_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL,
+            contact_name TEXT NOT NULL, contact_handle TEXT, topic TEXT NOT NULL,
+            summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Novo',
+            assigned_to TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS support_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL,
+            FOREIGN KEY(case_id) REFERENCES support_cases(id))""")
         count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         if count == 0:
             now = datetime.now().isoformat(timespec="seconds")
@@ -105,7 +146,7 @@ def adjust_stock(product_id, delta, note):
 init_db()
 
 st.title("📦 Fratelli | Gestão Interna")
-st.caption("MVP administrativo para catálogo e inventário. Não processa vendas, pagamentos, faturação nem expedição.")
+st.caption("MVP administrativo: catálogo, estoque e registo manual de atendimentos. Não envia mensagens nem processa vendas ou pagamentos.")
 
 products = get_products()
 active_products = products[products["active"] == 1] if not products.empty else products
