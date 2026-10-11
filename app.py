@@ -1,5 +1,7 @@
 import sqlite3
 import shutil
+import hmac
+import hashlib
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -35,20 +37,88 @@ def create_backup():
 
 
 def log_audit(conn, action, entity, details):
-    """Registra uma alteração administrativa sem guardar credenciais."""
+    """Registra uma alteração administrativa com o utilizador autenticado."""
+    actor = current_username() or "sistema"
     conn.execute(
-        "INSERT INTO audit_events (action, entity, details, created_at) VALUES (?, ?, ?, ?)",
-        (action, entity, str(details)[:1500], datetime.now().isoformat(timespec="seconds"))
+        "INSERT INTO audit_events (action, entity, actor, details, created_at) VALUES (?, ?, ?, ?, ?)",
+        (action, entity, actor, str(details)[:1500], datetime.now().isoformat(timespec="seconds"))
     )
 
 
 def get_audit_events(limit=500):
     with connect() as conn:
         rows = conn.execute(
-            "SELECT action, entity, details, created_at FROM audit_events ORDER BY id DESC LIMIT ?",
+            "SELECT action, entity, actor, details, created_at FROM audit_events ORDER BY id DESC LIMIT ?",
             (int(limit),)
         ).fetchall()
         return pd.DataFrame([dict(r) for r in rows])
+
+
+
+def _password_digest(password: str, salt_hex: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 310_000
+    ).hex()
+
+
+def configured_users():
+    """Lê os utilizadores a partir dos Secrets da plataforma."""
+    try:
+        raw = st.secrets.get("users", {})
+        return {str(username): dict(info) for username, info in raw.items()}
+    except Exception:
+        return {}
+
+
+def current_username():
+    return st.session_state.get("auth_user", "")
+
+
+def current_role():
+    return st.session_state.get("auth_role", "user")
+
+
+def require_admin():
+    if current_role() != "admin":
+        st.error("Esta ação exige perfil de administrador.")
+        st.stop()
+
+
+def render_login():
+    users = configured_users()
+    if not users:
+        st.error("O acesso ainda não foi configurado. Configure os utilizadores em Settings → Secrets no Streamlit Community Cloud.")
+        st.code("""[users.admin]\nsalt = "SALT_HEX_GERADO"\npassword_hash = "HASH_GERADO"\nrole = "admin" """, language="toml")
+        st.info("Gere as credenciais com o ficheiro gerar_credenciais.py. Nunca publique palavras-passe ou secrets no GitHub.")
+        st.stop()
+
+    if st.session_state.get("auth_user") in users:
+        return
+
+    st.title("🔐 Fratelli | Acesso")
+    with st.form("login_form"):
+        username = st.text_input("Utilizador")
+        password = st.text_input("Palavra-passe", type="password")
+        submitted = st.form_submit_button("Entrar", use_container_width=True)
+    if submitted:
+        record = users.get(username.strip())
+        if record:
+            salt = str(record.get("salt", ""))
+            expected = str(record.get("password_hash", ""))
+            if salt and expected:
+                try:
+                    actual = _password_digest(password, salt)
+                except ValueError:
+                    actual = ""
+                if hmac.compare_digest(actual, expected):
+                    role = str(record.get("role", "user")).lower()
+                    if role not in ("admin", "user"):
+                        role = "user"
+                    st.session_state["auth_user"] = username.strip()
+                    st.session_state["auth_role"] = role
+                    st.rerun()
+        st.error("Utilizador ou palavra-passe inválidos.")
+    st.stop()
 
 
 def connect():
@@ -128,9 +198,13 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             action TEXT NOT NULL,
             entity TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT 'sistema',
             details TEXT NOT NULL,
             created_at TEXT NOT NULL
         )""")
+        audit_columns = {row["name"] for row in conn.execute("PRAGMA table_info(audit_events)").fetchall()}
+        if "actor" not in audit_columns:
+            conn.execute("ALTER TABLE audit_events ADD COLUMN actor TEXT NOT NULL DEFAULT 'sistema'")
         count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         if count == 0:
             now = datetime.now().isoformat(timespec="seconds")
@@ -194,6 +268,7 @@ def adjust_stock(product_id, delta, note):
         log_audit(conn, "Movimentação de estoque", "Estoque", f"produto_id={int(product_id)}; tipo={movement_type}; quantidade={abs(int(delta))}; observação={note.strip()}")
 
 init_db()
+render_login()
 
 st.title("📦 Fratelli | Gestão Interna")
 st.caption("MVP administrativo para catálogo e inventário. Não processa vendas, pagamentos, faturação nem expedição.")
@@ -228,6 +303,7 @@ with tab_catalog:
             active = st.checkbox("Produto ativo", value=True)
             submitted = st.form_submit_button("Cadastrar")
             if submitted:
+                require_admin()
                 if not sku.strip() or not name.strip():
                     st.error("Preencha SKU e nome do produto.")
                 else:
@@ -249,6 +325,7 @@ with tab_catalog:
                 edit_active = st.checkbox("Produto ativo", value=bool(row["active"]))
                 edit_submitted = st.form_submit_button("Guardar alterações")
                 if edit_submitted:
+                    require_admin()
                     if not edit_sku.strip() or not edit_name.strip():
                         st.error("SKU e nome são obrigatórios.")
                     else:
@@ -272,6 +349,7 @@ with tab_stock:
             note = st.text_input("Observação / referência")
             save = st.form_submit_button("Registar movimento")
             if save:
+                require_admin()
                 delta = int(quantity) if movement == "Entrada" else -int(quantity)
                 try:
                     adjust_stock(product_options[chosen], delta, note)
@@ -304,6 +382,7 @@ with tab_support:
             assigned_to = st.text_input("Responsável interno (opcional)")
             submitted = st.form_submit_button("Guardar atendimento")
             if submitted:
+                require_admin()
                 if not contact_name.strip() or not summary.strip():
                     st.error("Preencha a identificação e o resumo.")
                 else:
@@ -341,6 +420,7 @@ with tab_support:
             note = st.text_area("Nota interna", max_chars=1000)
             save_update = st.form_submit_button("Guardar atualização")
             if save_update:
+                require_admin()
                 update_support_case(selected_id, status, assignee, note or "Estado atualizado.")
                 st.success("Atendimento atualizado.")
                 st.rerun()
@@ -359,7 +439,7 @@ with tab_audit:
     else:
         st.dataframe(
             audit.rename(columns={
-                "action": "Ação", "entity": "Área", "details": "Detalhes", "created_at": "Data/hora"
+                "action": "Ação", "entity": "Área", "actor": "Utilizador", "details": "Detalhes", "created_at": "Data/hora"
             }),
             use_container_width=True,
             hide_index=True
@@ -374,6 +454,7 @@ with tab_audit:
     st.subheader("Cópia de segurança")
     st.write("Cria uma cópia consistente do banco SQLite atual. Guarde também uma cópia fora do servidor.")
     if st.button("Criar backup agora"):
+        require_admin()
         try:
             backup_path = create_backup()
             if backup_path:

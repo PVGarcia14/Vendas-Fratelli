@@ -1,19 +1,29 @@
-# Fratelli — Gestão Interna (v3 administrativa)
+# Fratelli Gestão Interna v4 — acesso e auditoria
 
-## O que foi acrescentado
-- Aba **Auditoria** para consultar e exportar eventos administrativos.
-- Registos de auditoria para cadastro/edição de produtos, movimentações de estoque e alterações de atendimento.
-- Botão para criar e descarregar um backup consistente do banco SQLite.
-- Variáveis opcionais `FRATELLI_DB_PATH` e `FRATELLI_BACKUP_DIR` para definir caminhos de banco e backup.
+## Incluído
+- Login individual configurado via Streamlit Community Cloud Secrets.
+- Perfis `admin` e `user`; operações de alteração e backups exigem perfil `admin`.
+- Auditoria inclui o utilizador autenticado.
+- Migração da tabela de auditoria v3 para acrescentar a coluna `actor`.
+- Mantém catálogo, estoque, atendimento, exportação e backup SQLite.
 
-## Executar localmente
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
+## Configurar utilizadores
+1. Faça download do banco atual ou crie backup antes de atualizar.
+2. Execute localmente `python gerar_credenciais.py` para cada utilizador.
+3. Copie cada bloco produzido para **Streamlit Community Cloud → App → Settings → Secrets**.
+4. Exemplo estrutural (não use estes valores literalmente):
+   ```toml
+   [users.admin]
+   salt = "salt_hex_gerado"
+   password_hash = "hash_gerado"
+   role = "admin"
 
-## Importante
-- Faça uma cópia do `fratelli.db` atual antes de substituir a aplicação.
-- O backup criado pelo botão fica inicialmente na pasta `backups/`. Baixe-o e guarde-o fora do servidor.
-- Esta versão ainda não implementa login individual; por isso a auditoria não identifica qual pessoa executou a ação.
-- Em hospedagem com disco efêmero, o banco local pode ser perdido. Para produção, configure banco gerido persistente, autenticação e backups externos.
+   [users.operador]
+   salt = "outro_salt_hex"
+   password_hash = "outro_hash"
+   role = "user"
+   ```
+5. Não coloque palavras-passe nem `secrets.toml` no GitHub.
+
+## Persistência de dados — importante
+Esta versão ainda usa SQLite. No Streamlit Community Cloud, o sistema de arquivos local pode não ser persistente após reinícios ou redeploys. Login e auditoria não resolvem isso. Antes de depender da aplicação em produção, configure um banco gerido persistente (por exemplo PostgreSQL/Supabase) e migre o SQLite de forma controlada, com backup e validação. Esta entrega **não** faz migração automática para PostgreSQL.
