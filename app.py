@@ -88,8 +88,8 @@ def render_login():
     users = configured_users()
     if not users:
         st.error("O acesso ainda não foi configurado. Configure os utilizadores em Settings → Secrets no Streamlit Community Cloud.")
-        st.code("""[users.admin]\nsalt = "SALT_HEX_GERADO"\npassword_hash = "HASH_GERADO"\nrole = "admin" """, language="toml")
-        st.info("Gere as credenciais com o ficheiro gerar_credenciais.py. Nunca publique palavras-passe ou secrets no GitHub.")
+        st.code('[users.admin]\\npassword = "SUBSTITUA_PELA_SUA_PALAVRA_PASSE"\\nrole = "admin"', language="toml")
+        st.info("Substitua o texto de exemplo por uma palavra-passe forte escolhida por si. Guarde este bloco apenas em Settings → Secrets, nunca no GitHub.")
         st.stop()
 
     if st.session_state.get("auth_user") in users:
@@ -103,20 +103,28 @@ def render_login():
     if submitted:
         record = users.get(username.strip())
         if record:
+            # v4.1: aceita palavra-passe guardada nos Streamlit Secrets
+            # ou o método com salt + hash da versão anterior.
+            configured_password = record.get("password")
             salt = str(record.get("salt", ""))
-            expected = str(record.get("password_hash", ""))
-            if salt and expected:
+            expected_hash = str(record.get("password_hash", ""))
+            valid = False
+            if configured_password is not None:
+                valid = hmac.compare_digest(password, str(configured_password))
+            elif salt and expected_hash:
                 try:
-                    actual = _password_digest(password, salt)
+                    actual_hash = _password_digest(password, salt)
                 except ValueError:
-                    actual = ""
-                if hmac.compare_digest(actual, expected):
-                    role = str(record.get("role", "user")).lower()
-                    if role not in ("admin", "user"):
-                        role = "user"
-                    st.session_state["auth_user"] = username.strip()
-                    st.session_state["auth_role"] = role
-                    st.rerun()
+                    actual_hash = ""
+                valid = hmac.compare_digest(actual_hash, expected_hash)
+
+            if valid:
+                role = str(record.get("role", "user")).lower()
+                if role not in ("admin", "user"):
+                    role = "user"
+                st.session_state["auth_user"] = username.strip()
+                st.session_state["auth_role"] = role
+                st.rerun()
         st.error("Utilizador ou palavra-passe inválidos.")
     st.stop()
 
