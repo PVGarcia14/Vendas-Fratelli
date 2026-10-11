@@ -20,7 +20,6 @@ def connect():
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def get_support_cases():
     with connect() as conn:
         rows = conn.execute("SELECT * FROM support_cases ORDER BY updated_at DESC").fetchall()
@@ -77,14 +76,16 @@ def init_db():
             )
         """)
         conn.execute("""CREATE TABLE IF NOT EXISTS support_cases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL,
-            contact_name TEXT NOT NULL, contact_handle TEXT, topic TEXT NOT NULL,
-            summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Novo',
-            assigned_to TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL, contact_name TEXT NOT NULL, contact_handle TEXT,
+            topic TEXT NOT NULL, summary TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Novo',
+            assigned_to TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS support_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL,
             event_type TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL,
-            FOREIGN KEY(case_id) REFERENCES support_cases(id))""")
+            FOREIGN KEY(case_id) REFERENCES support_cases(id)
+        )""")
         count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         if count == 0:
             now = datetime.now().isoformat(timespec="seconds")
@@ -146,7 +147,7 @@ def adjust_stock(product_id, delta, note):
 init_db()
 
 st.title("📦 Fratelli | Gestão Interna")
-st.caption("MVP administrativo: catálogo, estoque e registo manual de atendimentos. Não envia mensagens nem processa vendas ou pagamentos.")
+st.caption("MVP administrativo para catálogo e inventário. Não processa vendas, pagamentos, faturação nem expedição.")
 
 products = get_products()
 active_products = products[products["active"] == 1] if not products.empty else products
@@ -155,8 +156,8 @@ c1.metric("Produtos cadastrados", int(len(products)))
 c2.metric("Produtos ativos", int(len(active_products)))
 c3.metric("Unidades em estoque", int(products["stock_qty"].sum()) if not products.empty else 0)
 
-tab_catalog, tab_stock, tab_history, tab_export = st.tabs(
-    ["Catálogo", "Movimentar estoque", "Histórico", "Exportar dados"]
+tab_catalog, tab_stock, tab_history, tab_support, tab_export = st.tabs(
+    ["Catálogo", "Movimentar estoque", "Histórico", "Atendimento", "Exportar dados"]
 )
 
 with tab_catalog:
@@ -241,14 +242,80 @@ with tab_history:
             "quantity": "Quantidade", "note": "Observação", "created_at": "Data/hora"
         }).drop(columns=["id"]), use_container_width=True, hide_index=True)
 
+with tab_support:
+    st.subheader("Registo de atendimento")
+    st.info("Registo manual de solicitações recebidas. Esta versão não se liga automaticamente ao Instagram ou WhatsApp e não envia mensagens. Recolha apenas os dados necessários.")
+    with st.expander("Registar novo atendimento"):
+        with st.form("support_case_form", clear_on_submit=True):
+            channel = st.selectbox("Canal", ["Instagram", "WhatsApp Business", "E-mail", "Telefone", "Outro"])
+            contact_name = st.text_input("Nome ou identificação do contacto")
+            contact_handle = st.text_input("Identificador público / referência (opcional)")
+            topic = st.selectbox("Assunto", ["Informação institucional", "Qualidade do produto", "Entrega existente", "Reclamação", "Privacidade / dados", "Outro"])
+            summary = st.text_area("Resumo da solicitação", max_chars=1500)
+            assigned_to = st.text_input("Responsável interno (opcional)")
+            submitted = st.form_submit_button("Guardar atendimento")
+            if submitted:
+                if not contact_name.strip() or not summary.strip():
+                    st.error("Preencha a identificação e o resumo.")
+                else:
+                    case_id = create_support_case(channel, contact_name, contact_handle, topic, summary, assigned_to)
+                    st.success(f"Atendimento #{case_id} registado.")
+                    st.rerun()
+
+    cases = get_support_cases()
+    if cases.empty:
+        st.info("Ainda não há atendimentos registados.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            status_filter = st.selectbox("Filtrar por estado", ["Todos", "Novo", "Em atendimento", "Encerrado"])
+        with col2:
+            channel_filter = st.selectbox("Filtrar por canal", ["Todos"] + sorted(cases["channel"].dropna().unique().tolist()))
+        filtered = cases.copy()
+        if status_filter != "Todos":
+            filtered = filtered[filtered["status"] == status_filter]
+        if channel_filter != "Todos":
+            filtered = filtered[filtered["channel"] == channel_filter]
+        st.dataframe(filtered[["id", "channel", "contact_name", "topic", "status", "assigned_to", "updated_at"]].rename(columns={
+            "id": "N.º", "channel": "Canal", "contact_name": "Contacto", "topic": "Assunto",
+            "status": "Estado", "assigned_to": "Responsável", "updated_at": "Atualizado em"
+        }), use_container_width=True, hide_index=True)
+
+        options = {f'#{int(r["id"])} — {r["contact_name"]} — {r["topic"]}': int(r["id"]) for _, r in cases.iterrows()}
+        selected = st.selectbox("Atendimento para atualizar", list(options.keys()))
+        selected_id = options[selected]
+        current = cases[cases["id"] == selected_id].iloc[0]
+        with st.form("update_support_form"):
+            status = st.selectbox("Novo estado", ["Novo", "Em atendimento", "Encerrado"],
+                                  index=["Novo", "Em atendimento", "Encerrado"].index(str(current["status"])))
+            assignee = st.text_input("Responsável", value=str(current["assigned_to"] or ""))
+            note = st.text_area("Nota interna", max_chars=1000)
+            save_update = st.form_submit_button("Guardar atualização")
+            if save_update:
+                update_support_case(selected_id, status, assignee, note or "Estado atualizado.")
+                st.success("Atendimento atualizado.")
+                st.rerun()
+        with st.expander("Histórico do atendimento"):
+            events = get_support_events(selected_id)
+            if not events.empty:
+                st.dataframe(events.rename(columns={"event_type": "Evento", "details": "Detalhes", "created_at": "Data/hora"}),
+                             use_container_width=True, hide_index=True)
+
 with tab_export:
     st.subheader("Exportar dados")
     current_products = get_products()
     current_movements = get_movements()
+    current_support = get_support_cases()
     st.download_button(
         "Descarregar catálogo CSV",
         data=current_products.to_csv(index=False).encode("utf-8-sig"),
         file_name="fratelli_catalogo.csv",
+        mime="text/csv"
+    )
+    st.download_button(
+        "Descarregar atendimentos CSV",
+        data=current_support.to_csv(index=False).encode("utf-8-sig"),
+        file_name="fratelli_atendimentos.csv",
         mime="text/csv"
     )
     st.download_button(
