@@ -1,16 +1,19 @@
-# Vendas Fratelli — Gestão Interna v2 corrigida
+# Fratelli — Gestão Interna (v3 administrativa)
 
-Inclui catálogo, movimentação de estoque, histórico, exportação CSV e registo manual de atendimentos.
+## O que foi acrescentado
+- Aba **Auditoria** para consultar e exportar eventos administrativos.
+- Registos de auditoria para cadastro/edição de produtos, movimentações de estoque e alterações de atendimento.
+- Botão para criar e descarregar um backup consistente do banco SQLite.
+- Variáveis opcionais `FRATELLI_DB_PATH` e `FRATELLI_BACKUP_DIR` para definir caminhos de banco e backup.
 
-## Atendimento
-Permite registar solicitações recebidas, atribuir responsável e atualizar estados. Não se liga automaticamente às APIs do Instagram/WhatsApp e não envia mensagens.
-
-## Executar no Windows
-```powershell
-py -m venv .venv
-.venv\\Scripts\\Activate.ps1
+## Executar localmente
+```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Nota: usa SQLite local; para produção, configurar PostgreSQL persistente, autenticação, backups e controlo de acesso. Não armazenar credenciais no código ou no GitHub.
+## Importante
+- Faça uma cópia do `fratelli.db` atual antes de substituir a aplicação.
+- O backup criado pelo botão fica inicialmente na pasta `backups/`. Baixe-o e guarde-o fora do servidor.
+- Esta versão ainda não implementa login individual; por isso a auditoria não identifica qual pessoa executou a ação.
+- Em hospedagem com disco efêmero, o banco local pode ser perdido. Para produção, configure banco gerido persistente, autenticação e backups externos.

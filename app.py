@@ -1,4 +1,5 @@
 import sqlite3
+import shutil
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -6,6 +7,7 @@ import streamlit as st
 
 APP_DIR = Path(__file__).parent
 DB_PATH = Path(__import__("os").environ.get("FRATELLI_DB_PATH", str(APP_DIR / "fratelli.db")))
+BACKUP_DIR = Path(__import__("os").environ.get("FRATELLI_BACKUP_DIR", str(APP_DIR / "backups")))
 
 st.set_page_config(page_title="Fratelli | Gestão Interna", page_icon="📦", layout="wide")
 
@@ -14,6 +16,40 @@ PRODUCT_SEED = [
     ("FR-DES-700", "Fratelli Desertos", 162.20, 0, True),
     ("FR-CAN-700", "Fratelli Cânions", 175.20, 0, True),
 ]
+
+def create_backup():
+    """Cria uma cópia consistente do banco SQLite, se ele já existir."""
+    if not DB_PATH.exists():
+        return None
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = BACKUP_DIR / f"fratelli_backup_{stamp}.db"
+    source = sqlite3.connect(DB_PATH)
+    target = sqlite3.connect(backup_path)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+    return backup_path
+
+
+def log_audit(conn, action, entity, details):
+    """Registra uma alteração administrativa sem guardar credenciais."""
+    conn.execute(
+        "INSERT INTO audit_events (action, entity, details, created_at) VALUES (?, ?, ?, ?)",
+        (action, entity, str(details)[:1500], datetime.now().isoformat(timespec="seconds"))
+    )
+
+
+def get_audit_events(limit=500):
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT action, entity, details, created_at FROM audit_events ORDER BY id DESC LIMIT ?",
+            (int(limit),)
+        ).fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+
 
 def connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -35,6 +71,7 @@ def create_support_case(channel, contact_name, contact_handle, topic, summary, a
         case_id = cur.lastrowid
         conn.execute("INSERT INTO support_events (case_id, event_type, details, created_at) VALUES (?, ?, ?, ?)",
                      (case_id, "Caso criado", f"Canal: {channel}; assunto: {topic}", now))
+        log_audit(conn, "Criação", "Atendimento", f"caso_id={case_id}; canal={channel}; assunto={topic}")
         return case_id
 
 def update_support_case(case_id, status, assigned_to, note):
@@ -44,6 +81,7 @@ def update_support_case(case_id, status, assigned_to, note):
                      (status, assigned_to.strip(), now, int(case_id)))
         conn.execute("INSERT INTO support_events (case_id, event_type, details, created_at) VALUES (?, ?, ?, ?)",
                      (int(case_id), "Atualização", f"Estado: {status}; responsável: {assigned_to.strip()}; nota: {note.strip()}", now))
+        log_audit(conn, "Atualização", "Atendimento", f"caso_id={int(case_id)}; estado={status}; responsável={assigned_to.strip()}")
 
 def get_support_events(case_id):
     with connect() as conn:
@@ -86,6 +124,13 @@ def init_db():
             event_type TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL,
             FOREIGN KEY(case_id) REFERENCES support_cases(id)
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            entity TEXT NOT NULL,
+            details TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
         count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         if count == 0:
             now = datetime.now().isoformat(timespec="seconds")
@@ -119,6 +164,7 @@ def add_product(sku, name, unit_price, stock_qty, active):
             "INSERT INTO products (sku, name, unit_price, stock_qty, active, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (sku.strip(), name.strip(), float(unit_price), int(stock_qty), int(active), now)
         )
+        log_audit(conn, "Cadastro", "Produto", f"SKU={sku.strip()}; nome={name.strip()}; estoque inicial={int(stock_qty)}")
 
 def update_product(product_id, sku, name, unit_price, active):
     with connect() as conn:
@@ -126,6 +172,7 @@ def update_product(product_id, sku, name, unit_price, active):
             "UPDATE products SET sku=?, name=?, unit_price=?, active=? WHERE id=?",
             (sku.strip(), name.strip(), float(unit_price), int(active), int(product_id))
         )
+        log_audit(conn, "Edição", "Produto", f"id={int(product_id)}; SKU={sku.strip()}; nome={name.strip()}; ativo={bool(active)}")
 
 def adjust_stock(product_id, delta, note):
     if delta == 0:
@@ -139,10 +186,12 @@ def adjust_stock(product_id, delta, note):
         if new_qty < 0:
             raise ValueError("O estoque não pode ficar negativo.")
         conn.execute("UPDATE products SET stock_qty=? WHERE id=?", (new_qty, int(product_id)))
+        movement_type = "ENTRADA" if delta > 0 else "SAÍDA"
         conn.execute(
             "INSERT INTO stock_movements (product_id, movement_type, quantity, note, created_at) VALUES (?, ?, ?, ?, ?)",
-            (int(product_id), "ENTRADA" if delta > 0 else "SAÍDA", abs(int(delta)), note.strip(), now)
+            (int(product_id), movement_type, abs(int(delta)), note.strip(), now)
         )
+        log_audit(conn, "Movimentação de estoque", "Estoque", f"produto_id={int(product_id)}; tipo={movement_type}; quantidade={abs(int(delta))}; observação={note.strip()}")
 
 init_db()
 
@@ -156,8 +205,8 @@ c1.metric("Produtos cadastrados", int(len(products)))
 c2.metric("Produtos ativos", int(len(active_products)))
 c3.metric("Unidades em estoque", int(products["stock_qty"].sum()) if not products.empty else 0)
 
-tab_catalog, tab_stock, tab_history, tab_support, tab_export = st.tabs(
-    ["Catálogo", "Movimentar estoque", "Histórico", "Atendimento", "Exportar dados"]
+tab_catalog, tab_stock, tab_history, tab_support, tab_audit, tab_export = st.tabs(
+    ["Catálogo", "Movimentar estoque", "Histórico", "Atendimento", "Auditoria", "Exportar dados"]
 )
 
 with tab_catalog:
@@ -301,6 +350,45 @@ with tab_support:
                 st.dataframe(events.rename(columns={"event_type": "Evento", "details": "Detalhes", "created_at": "Data/hora"}),
                              use_container_width=True, hide_index=True)
 
+with tab_audit:
+    st.subheader("Auditoria de alterações")
+    st.caption("Registo administrativo de operações feitas pela aplicação. Não identifica utilizadores porque esta versão ainda não tem login individual.")
+    audit = get_audit_events()
+    if audit.empty:
+        st.info("Ainda não há eventos de auditoria.")
+    else:
+        st.dataframe(
+            audit.rename(columns={
+                "action": "Ação", "entity": "Área", "details": "Detalhes", "created_at": "Data/hora"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+        st.download_button(
+            "Descarregar auditoria CSV",
+            data=audit.to_csv(index=False).encode("utf-8-sig"),
+            file_name="fratelli_auditoria.csv",
+            mime="text/csv"
+        )
+    st.divider()
+    st.subheader("Cópia de segurança")
+    st.write("Cria uma cópia consistente do banco SQLite atual. Guarde também uma cópia fora do servidor.")
+    if st.button("Criar backup agora"):
+        try:
+            backup_path = create_backup()
+            if backup_path:
+                st.success(f"Backup criado: {backup_path.name}")
+                st.download_button(
+                    "Descarregar backup criado",
+                    data=backup_path.read_bytes(),
+                    file_name=backup_path.name,
+                    mime="application/octet-stream"
+                )
+            else:
+                st.warning("O banco de dados ainda não existe; não foi criado backup.")
+        except Exception as exc:
+            st.error(f"Não foi possível criar o backup: {exc}")
+
 with tab_export:
     st.subheader("Exportar dados")
     current_products = get_products()
@@ -324,6 +412,13 @@ with tab_export:
         file_name="fratelli_movimentacoes.csv",
         mime="text/csv"
     )
+    current_audit = get_audit_events()
+    st.download_button(
+        "Descarregar auditoria CSV",
+        data=current_audit.to_csv(index=False).encode("utf-8-sig"),
+        file_name="fratelli_auditoria.csv",
+        mime="text/csv"
+    )
 
 st.divider()
-st.caption("MVP de demonstração. SQLite local é adequado para testes; para produção, usar PostgreSQL gerido, autenticação robusta, backups e controlo de acesso.")
+st.caption("MVP administrativo. O backup manual e a auditoria ajudam na recuperação e rastreabilidade, mas não substituem armazenamento persistente, autenticação individual, controlo de acesso e backups externos em produção.")
